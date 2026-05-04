@@ -14,54 +14,24 @@
 #
 #########
 
-SCRIPTDL="https://raw.githubusercontent.com/bolemo/pia_wg/main/pia_wg.sh"
 SCRIPTPATH="$(CDPATH="" cd -- "$(dirname -- "$0")" && pwd)/${0##*/}"
-LOGDEFPATH='/var/log'
-LOGNAME='pia_wg_watchdog.log'
 PIACONF='/etc/config/pia_wg'
 PIAWG_IF='wg_pia'
 PIAWG_PEER='wgpeer_pia'
-CURVERS="$(awk '(index($0,"# Version: ")==1){print $3; exit}' "$SCRIPTPATH")"
+PIALOG='/var/log/pia_wg_watchdog.log'
 
 read_yn() {
-  while
-    printf "%s? (y/n):" "$1"
+  while :; do
+    printf "%s? (y/n): " "$1"
     read -r AND
-    echo "$AND" | grep -qvi '^\(y\(es\)\?\|no\?\)$'
-  do :; done
-  case "$AND" in
-  n | N | no | No | nO | NO) return 1 ;;
-  *) return 0 ;;
-  esac
+    case "$AND" in
+      [Yy]|[Yy][Ee][Ss]) return 0 ;;
+      [Nn]|[Nn][Oo]) return 1 ;;
+    esac
+  done
 }
 
-set_logpath() {
-  if [ "$1" ]; then
-    LOGPATH="$1"
-  else
-    LOGPATH="$(uci -q get pia_wg.@log[0].path)"
-    echo "Current Directory Path is: $LOGPATH"
-    printf "Enter the Directory Path for the log (press enter to keep current one): "
-    read -r NEWLOGPATH
-    [ -z "$NEWLOGPATH" ] || LOGPATH="$NEWLOGPATH"
-  fi
-  uci -q batch <<EOI >/dev/null
-    delete pia_wg.@log[0]
-    add pia_wg log
-    set pia_wg.@log[0].path="$LOGPATH"
-    commit pia_wg.@log[0]
-EOI
-}
 
-logfile() {
-  if LOGPATH=$(uci -q get pia_wg.@log[0].path); then
-    [ -d "$LOGPATH" ] || mkdir -p "$LOGPATH" 2>/dev/null
-    echo "$LOGPATH/$LOGNAME"
-  else
-    set_logpath "$LOGDEFPATH"
-    echo "$LOGDEFPATH/$LOGNAME"
-  fi
-}
 
 select_region() {
   echo "Fetching latest PIA servers list…"
@@ -271,53 +241,34 @@ keep_conf_section() {
 }
 
 check_conf() {
-  uci -q get pia_wg.@user[0] >/dev/null &&
-    echo "User is configured" ||
-    {
-      echo "User is not configured!" >&3
-      sleep 1
-      [ "$AUTO" ] && return 1 || set_piauser
-    }
-  uci -q get pia_wg.@keys[0] >/dev/null &&
-    echo "Local keys are configured" ||
-    {
-      echo "Local keys are not configured!" >&3
-      sleep 1
-      generate_wgkeys
-    }
-  uci -q get pia_wg.@net_interface[0] >/dev/null &&
-    echo "Network interface options are configured" ||
-    {
-      echo "Network interface options are not configured!" >&3
-      sleep 1
-      [ "$AUTO" ] && return 1 || set_defnetiface
-    }
-  uci -q get pia_wg.@net_peer[0] >/dev/null &&
-    echo "Network peer options are configured" ||
-    {
-      echo "Network peer options are not configured!" >&3
-      sleep 1
-      [ "$AUTO" ] && return 1 || set_defnetpeer
-    }
+  if ! uci -q get pia_wg.@user[0] >/dev/null; then
+    echo "User is not configured!" >&3
+    [ "$AUTO" ] && return 1 || set_piauser
+  fi
+  if ! uci -q get pia_wg.@keys[0] >/dev/null; then
+    echo "Local keys are not configured!" >&3
+    generate_wgkeys
+  fi
+  if ! uci -q get pia_wg.@net_interface[0] >/dev/null; then
+    echo "Network interface options are not configured!" >&3
+    [ "$AUTO" ] && return 1 || set_defnetiface
+  fi
+  if ! uci -q get pia_wg.@net_peer[0] >/dev/null; then
+    echo "Network peer options are not configured!" >&3
+    [ "$AUTO" ] && return 1 || set_defnetpeer
+  fi
   if uci -q get pia_wg.@dip[0] >/dev/null; then
-    echo "Dedicated IP is configured"
     validate_dip
     DIP_STATUS="$(uci -q get pia_wg.@dip[0].status)"
-    [ "$DIP_STATUS" = 'active' ] &&
-      echo "Dedicated IP is active" ||
-      {
-        echo "Dedicated IP status is $DIP_STATUS!" >&3
-        sleep 1
-        return 1
-      }
+    if [ "$DIP_STATUS" != 'active' ]; then
+      echo "Dedicated IP status is $DIP_STATUS!" >&3
+      return 1
+    fi
   fi
-  uci -q get pia_wg.@region[0] >/dev/null &&
-    echo "PIA region is configured" ||
-    {
-      echo "PIA region is not configured!" >&3
-      sleep 1
-      [ "$AUTO" ] && return 1 || select_region
-    }
+  if ! uci -q get pia_wg.@region[0] >/dev/null; then
+    echo "PIA region is not configured!" >&3
+    [ "$AUTO" ] && return 1 || select_region
+  fi
 }
 
 set_netconf() {
@@ -459,33 +410,10 @@ log_clear() {
   echo "[$(date)] Log cleared" >"$PIALOG"
 }
 
-script_update() {
-  TMPDL="/tmp/pia_wg_dl.tmp"
-  curl -s -o "$TMPDL" "$SCRIPTDL" || {
-    echo "Failed to check/download latest version!" >&2
-    rm "$TMPDL"
-    exit 1
-  }
-  MD5D="$(md5sum "$TMPDL" | cut -d' ' -f1)"
-  MD5C="$(md5sum "$SCRIPTPATH" | cut -d' ' -f1)"
-  [ "$MD5D" = "$MD5C" ] && {
-    echo "This is already latest version ($CURVERS)"
-    rm "$TMPDL"
-    exit
-  }
-  NEWVERS="$(awk '(index($0,"# Version: ")==1){print $3; exit}' "$TMPDL")"
-  read_yn "Version $NEWVERS is available (current: $CURVERS); install" || {
-    rm "$TMPDL"
-    exit
-  }
-  echo "Upgrading from version $CURVERS to version $NEWVERS"
-  mv "$TMPDL" "$SCRIPTPATH"
-  chmod +x "$SCRIPTPATH"
-  echo "Done"
-}
+
 
 print_usage() {
-  echo "Usage: $0 { configure <section> | start [ --watchdog ] | restart [ --watchdog ] | stop | status | watchdog { install | remove } | log { show | clear | path } | update | version}"
+  echo "Usage: $0 { configure <section> | start [ --watchdog ] | restart [ --watchdog ] | stop | status | watchdog { install | remove } | log { show | clear } }"
   echo "  Details:"
   echo "    - configure          : same as configure all"
   echo "    - configure all      : configure all settings"
@@ -505,32 +433,18 @@ print_usage() {
   echo "    - watchdog remove    : remove the watchdog"
   echo "    - log show           : display the watchdog log"
   echo "    - log clear          : clear the watchdog log"
-  echo "    - log path           : set a custom Directory Path for the log"
-  echo "    - update             : update the script to latest version"
-  echo "    - version            : print the version and exit"
 }
 
 # ---- Main ->
 
 [ -e "$PIACONF" ] || touch "$PIACONF"
-PIALOG="$(logfile)"
 [ -t 0 ] && unset AUTO || AUTO=1
 
 # Logging (only if not in interactive mode)
 if [ "$AUTO" ]; then
-  FIFO="$(mktemp -u /tmp/pia_wg.XXXXXXXXXX)"
-  export FIFO
-  # shellcheck disable=SC2329  # Function is used in trap below
-  _exit() {
-    exec 3>&-
-    rm "$FIFO" >/dev/null 2>&1
-    exit
-  }
-  trap "_exit" 1 2 3 6 EXIT
-  [ -f "$PIALOG" ] && touch "$PIALOG" || echo "[$(date)] Log created" >"$PIALOG"
-  mkfifo "$FIFO"
-  awk -v lf="$PIALOG" -v date="$(date)" '{print; printf("[%s] %s\n",date,$0) >> lf}' "$FIFO" >&2 &
-  exec 3<>"$FIFO"
+  exec 3>&2
+  exec 2>>"$PIALOG"
+  echo "[$(date)] Watchdog executed" >&2
 else
   exec 3>&2
 fi
@@ -613,15 +527,12 @@ case "$1" in
 'log') case "$2" in
   'show') log_show ;;
   'clear') log_clear ;;
-  'path') set_logpath ;;
   *)
     echo "Unknown log subcommand '$2'!"
     print_usage
     exit 1
     ;;
   esac ;;
-'update') script_update ;;
-'version') echo "Version is ${CURVERS}" ;;
 '') print_usage ;;
 *)
   echo "Unknown command '$*'!" >&2
