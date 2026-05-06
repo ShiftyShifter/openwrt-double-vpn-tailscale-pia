@@ -163,12 +163,54 @@ set_defnetiface() {
     delete pia_wg.@net_interface[0]
     add pia_wg net_interface
     set pia_wg.@net_interface[0].proto="wireguard"
-    set pia_wg.@net_interface[0].defaultroute='1'
+    set pia_wg.@net_interface[0].defaultroute='0'
     set pia_wg.@net_interface[0].delegate='0' # No IPv6 with PIA
     commit pia_wg.@net_interface[0]
 EOI
 }
 
+set_firewall() {
+  echo "Configuring firewall settings..."
+  local ZONE_IDX=""
+  
+  local i=0
+  while uci -q get firewall.@zone[$i] >/dev/null; do
+    if [ "$(uci -q get firewall.@zone[$i].name)" = "pia_exit" ]; then
+      ZONE_IDX=$i
+      break
+    fi
+    i=$((i+1))
+  done
+
+  if [ -z "$ZONE_IDX" ]; then
+    echo "Creating new firewall zone 'pia_exit'..."
+    uci -q batch <<EOI >/dev/null
+      add firewall zone
+      set firewall.@zone[-1].name='pia_exit'
+      set firewall.@zone[-1].input='REJECT'
+      set firewall.@zone[-1].output='ACCEPT'
+      set firewall.@zone[-1].forward='REJECT'
+      set firewall.@zone[-1].masq='1'
+      set firewall.@zone[-1].mtu_fix='1'
+      add_list firewall.@zone[-1].network='$PIAWG_IF'
+      add firewall forwarding
+      set firewall.@forwarding[-1].src='lan'
+      set firewall.@forwarding[-1].dest='pia_exit'
+      commit firewall
+EOI
+  else
+    echo "Updating existing firewall zone 'pia_exit'..."
+    uci -q batch <<EOI >/dev/null
+      set firewall.@zone[$ZONE_IDX].masq='1'
+      set firewall.@zone[$ZONE_IDX].mtu_fix='1'
+      del_list firewall.@zone[$ZONE_IDX].network='$PIAWG_IF'
+      add_list firewall.@zone[$ZONE_IDX].network='$PIAWG_IF'
+      commit firewall
+EOI
+  fi
+  /etc/init.d/firewall restart >/dev/null 2>&1
+  echo "Firewall configured."
+}
 generate_wgkeys() {
   WGPRIVKEY="$(wg genkey)"
   WGPUBKEY="$(echo "$WGPRIVKEY" | wg pubkey)"
@@ -279,11 +321,20 @@ set_netconf() {
   uci -q get pia_wg.@token[0] >/dev/null && [ $(($(date +%s) - $(uci get pia_wg.@token[0].timestamp))) -lt 86400 ] || renew_piatoken
   echo "Initializing network"
 
+  PIA_REGION_DNS="$(uci -q get pia_wg.@region[0].dns)"
+  PIA_REGION_IP="$(nslookup "$PIA_REGION_DNS" 8.8.8.8 2>/dev/null | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | grep -v '8.8.8.8' | head -n1)"
+  
+  if [ -n "$PIA_REGION_IP" ] && [ "$PIA_REGION_IP" != "null" ]; then
+    RESOLVE_ARG="--resolve $PIA_REGION_DNS:1337:$PIA_REGION_IP"
+  else
+    RESOLVE_ARG=""
+  fi
+
   # if no DIP (DIP_STATUS is set from check_conf)
   if [ -z "$DIP_STATUS" ]; then
-    PIAADDKEY="$(curl -s -k -G --data-urlencode "pt=$(uci -q get pia_wg.@token[0].hash)" --data-urlencode "pubkey=$(uci -q get pia_wg.@keys[0].pub)" "https://$(uci -q get pia_wg.@region[0].dns):1337/addKey")"
+    PIAADDKEY="$(curl -sS --connect-timeout 10 -k -G $RESOLVE_ARG --data-urlencode "pt=$(uci -q get pia_wg.@token[0].hash)" --data-urlencode "pubkey=$(uci -q get pia_wg.@keys[0].pub)" "https://$PIA_REGION_DNS:1337/addKey")"
   else
-    PIAADDKEY="$(curl -s -k -G --connect-to "$(uci -q get pia_wg.@dip[0].cn)::$(uci -q get pia_wg.@dip[0].ip)" --user "dedicated_ip_$(uci -q get pia_wg.@dip[0].token):$(uci -q get pia_wg.@dip[0].ip)" --data-urlencode "pubkey=$(uci -q get pia_wg.@keys[0].pub)" "https://$(uci -q get pia_wg.@dip[0].cn):1337/addKey")"
+    PIAADDKEY="$(curl -sS --connect-timeout 10 -k -G --connect-to "$(uci -q get pia_wg.@dip[0].cn)::$(uci -q get pia_wg.@dip[0].ip)" --user "dedicated_ip_$(uci -q get pia_wg.@dip[0].token):$(uci -q get pia_wg.@dip[0].ip)" --data-urlencode "pubkey=$(uci -q get pia_wg.@keys[0].pub)" "https://$(uci -q get pia_wg.@dip[0].cn):1337/addKey")"
   fi
   #  echo "$PIAADDKEY"
 
@@ -300,12 +351,11 @@ set_netconf() {
   WGDNS2="$(echo "$PIAADDKEY" | jq -r '.dns_servers[1]')"
   WGPEERIP="$(echo "$PIAADDKEY" | jq -r '.peer_ip')"
 
-  uci -q batch <<EOI >/dev/null
-  delete network.$PIAWG_IF
-  delete network.$PIAWG_PEER
+  uci batch <<EOI >/dev/null
   set network.$PIAWG_IF=interface
   set network.$PIAWG_IF.addresses="$WGPEERIP"
   set network.$PIAWG_IF.private_key="$(uci -q get pia_wg.@keys[0].priv)"
+  set network.$PIAWG_IF.defaultroute='0'
   add_list network.$PIAWG_IF.dns="$WGDNS1"
   add_list network.$PIAWG_IF.dns="$WGDNS2"
   set network.$PIAWG_PEER="wireguard_${PIAWG_IF}"
@@ -327,9 +377,9 @@ $(uci export pia_wg | awk '
     }
 ')
 
-  commit network.$PIAWG_IF
-  commit network.$PIAWG_PEER
+  commit network
 EOI
+  /etc/init.d/network restart
 }
 
 start_wgpia() {
@@ -337,7 +387,10 @@ start_wgpia() {
   set_netconf
   echo "Starting PIA ($(uci get network.$PIAWG_PEER.description))" >&3
   ifup $PIAWG_IF
-  sleep 1
+  for i in $(seq 1 15); do
+    ubus call network.interface.${PIAWG_IF} status 2>/dev/null | grep -q '"up": true' && break
+    sleep 1
+  done
   check_wg
   RET=$?
   [ $RET -eq 0 ] && echo "PIA started successfully ..." >&3 || echo "Could not start PIA!" >&3
@@ -345,9 +398,20 @@ start_wgpia() {
 }
 
 stop_wgpia() {
-  DESC=" ($(uci -q get network.$PIAWG_PEER.description))" || DESC=""
+  DESC=" ($(uci -q get network.$PIAWG_PEER.description 2>/dev/null))" || DESC=""
   echo "Stopping PIA$DESC" >&3
   ifdown $PIAWG_IF >/dev/null 2>&1
+  uci -q batch <<EOI >/dev/null
+  delete network.$PIAWG_IF
+  delete network.$PIAWG_PEER
+  commit network
+EOI
+  /etc/init.d/network restart
+  echo "Waiting for raw WAN connectivity to settle..." >&3
+  for i in $(seq 1 15); do
+    ping -c 1 -W 1 8.8.8.8 >/dev/null 2>&1 && break
+    sleep 1
+  done
 }
 
 check_wg() {
@@ -363,12 +427,18 @@ check_wg() {
   fi
 
   echo "Region is: $(uci get network.$PIAWG_PEER.description)"
-  if traceroute -i "$PIAWG_IF" -q1 -m1 1.1.1.1 | grep -q ' ms'; then
-    echo "Connectivity through PIA: OK"
-  elif ping -q -c1 -n -I "$WAN_IF" "$PIAWG_EP" >/dev/null; then
+  for i in $(seq 1 10); do
+    if ping -q -c1 -W1 -I "$PIAWG_IF" 8.8.8.8 >/dev/null 2>&1; then
+      echo "Connectivity through PIA: OK"
+      return 0
+    fi
+    sleep 1
+  done
+
+  if ping -q -c1 -n -I "$WAN_IF" "$PIAWG_EP" >/dev/null; then
     echo "Connectivity through PIA: NOK" >&3
     return 1
-  elif traceroute -i "$WAN_IF" -q1 -m1 1.1.1.1 | grep -q ' ms'; then
+  elif traceroute -i "$WAN_IF" -q1 -m1 8.8.8.8 2>/dev/null | grep -q ' ms'; then
     echo "Access to PIA Endpoint through WAN: NOK!" >&3
     return 1
   else
@@ -389,7 +459,7 @@ watchdog_lastrun() {
 watchdog_install() {
   watchdog_installed && return
   {
-    crontab -l
+    crontab -l 2>/dev/null
     echo "* * * * * /bin/sh $SCRIPTPATH start # pia_wg watchdog"
   } | crontab -
   echo "[$(date)] Watchdog installed" >>"$PIALOG"
@@ -422,6 +492,7 @@ print_usage() {
   echo "    - configure region   : set/choose PIA region"
   echo "    - configure keys     : generate local WireGuard keys"
   echo "    - configure network  : generate default network settings"
+  echo "    - configure firewall : verify and apply pia_exit firewall rules"
   echo "    - init-network       : setup PIA WireGuard network (no start)"
   echo "    - start              : start PIA WireGuard (if not already up)"
   echo "    - start --watchdog   : same as start and install the watchdog"
@@ -465,6 +536,7 @@ case "$1" in
     fi
     # if no DIP ask for region
     uci -q get pia_wg.@dip[0].token >/dev/null || keep_conf_section 'region' || select_region
+    set_firewall
     ;;
   'user') keep_conf_section 'user' || set_piauser ;;
   'dip') keep_conf_section 'dip' || set_dip ;;
@@ -473,6 +545,7 @@ case "$1" in
     keep_conf_section 'net_interface' || set_defnetiface
     keep_conf_section 'net_peer' || set_defnetpeer
     ;;
+  'firewall') set_firewall ;;
   'keys') keep_conf_section 'keys' || generate_wgkeys ;;
   *)
     echo "Unknown configure subcommand '$2'!"
