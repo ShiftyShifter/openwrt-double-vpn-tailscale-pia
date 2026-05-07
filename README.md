@@ -10,10 +10,10 @@ This project provides a clean, native OpenWrt routing architecture that allows y
 
 ## Scripts
 
-### 1. `pia_wg.sh`
-Maintains the WireGuard connection to Private Internet Access.
-- **Location**: `/opt/scripts/pia_wg.sh`
-- **Action**: Establishes the `wg_pia` interface and updates keys/tokens.
+### 1. `pia_vpn_manager.sh`
+Maintains the WireGuard connection to Private Internet Access. This is the refactored and documented version of the original `pia_wg.sh`.
+- **Location**: `/opt/scripts/pia_vpn_manager.sh`
+- **Action**: Handles authentication, region selection, and ensures the `wg_pia` interface remains healthy and connected.
 
 ### 2. `setup_native_double_vpn.sh`
 Configures the complex routing and firewall rules natively within OpenWrt (no third-party PBR packages required).
@@ -29,7 +29,7 @@ Configures the complex routing and firewall rules natively within OpenWrt (no th
 1.  **Prepare the Router**:
     Ensure `tailscale`, `wireguard-tools`, and `curl` are installed.
 2.  **Configure PIA**:
-    Run `/opt/scripts/pia_wg.sh start` and follow the prompts to enter your PIA credentials and select a region.
+    Run `/opt/scripts/pia_vpn_manager.sh configure` to set up your credentials and choose a region. Then run `/opt/scripts/pia_vpn_manager.sh start` to connect.
 3.  **Run the Native Setup**:
     Execute the setup script:
     ```bash
@@ -71,5 +71,5 @@ To ensure a full recovery, include the following files and directories in your b
    opkg update && opkg install tailscale wireguard-tools curl jq-full ip-full openssh-sftp-server
    ```
 2. **Restore Files**: Restore the backed-up configurations and scripts to their original locations.
-3. **Re-establish VPN**: Run `/opt/scripts/pia_wg.sh start` to initialize the VPN interface and keys.
+3. **Re-establish VPN**: Run `/opt/scripts/pia_vpn_manager.sh start` to initialize the VPN interface and keys.
 4. **Apply Routing**: Run `/opt/scripts/setup_native_double_vpn.sh` to re-apply the native double-VPN routing and firewall rules.
