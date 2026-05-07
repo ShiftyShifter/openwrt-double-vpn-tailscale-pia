@@ -1,102 +1,57 @@
-# pia_wg.sh
-A script to setup and run PIA through WireGuard on OpenWrt
-<br />https://github.com/bolemo/pia_wg/
+# OpenWrt Native Double-VPN Setup
 
-## Inspired from:
-  - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
-  - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
+This project provides a clean, native OpenWrt routing architecture that allows you to use your router as a **Tailscale Exit Node** while forcing all exit-node and LAN traffic through a **Private Internet Access (PIA) VPN** tunnel.
 
-## Version
-1.0.16
+## Goals Achieved
+1.  **Isolated Private LAN**: Creates a secure subnet (`192.168.2.0/24`) behind your main ISP hub, keeping hardwired devices private.
+2.  **Double VPN Protection**: Traffic from your mobile device flows through Tailscale -> OpenWrt -> PIA VPN -> Internet.
+3.  **VPN Bypass for Tailscale Stability**: Tailscale's own encrypted background traffic automatically bypasses the PIA VPN to maintain a stable P2P connection to other nodes.
+4.  **Subnet Access**: Allows you to access your hardwired LAN devices remotely via the Tailscale network.
 
-## Install
-  - Connect to your OpenWrt router with SSH
-  - Go to (and create if needed) the location you want to install the script
-<br /> For example: `mkdir /opt/scripts; cd /opt/scripts`
-  - Download the script: `wget https://raw.githubusercontent.com/bolemo/pia_wg/main/pia_wg.sh`
-  - Give execution permission to the script: `chmod +x pia_wg.sh`
-  - Install packages which the script depends on: `opkg update && opkg install jq-full curl wireguard-tools luci-proto-wireguard coreutils-stty coreutils-nl`
-  - Configure and run:
-    - To configure and run PIA, use `./pia_wg.sh start` (or `./pia_wg.sh start --watchdog` if you want the watchdog installed) and answer the questions
-    - To just configure, use `./pia_wg.sh configure` and answer the questions
-<br /> Then you can setup network advanced/expert settings (see below) and then to run, use `./pia_wg.sh start` (or `./pia_wg.sh start --watchdog`)
+## Scripts
 
-## Setup firewall
+### 1. `pia_wg.sh`
+Maintains the WireGuard connection to Private Internet Access.
+- **Location**: `/opt/scripts/pia_wg.sh`
+- **Action**: Establishes the `wg_pia` interface and updates keys/tokens.
 
-__The firewall setup depends on your needs and your personal configuration.__
+### 2. `setup_native_double_vpn.sh`
+Configures the complex routing and firewall rules natively within OpenWrt (no third-party PBR packages required).
+- **Location**: `/opt/scripts/setup_native_double_vpn.sh`
+- **Key Features**:
+    - Creates a `wan_direct` routing table for VPN bypass.
+    - Adds IP rules to handle Tailscale's `fwmark 0x80000` traffic.
+    - Sets up firewall zones (`tailscale`, `pia_exit`) and forwarding.
+    - Automatically advertises the router as an exit node and exposes the LAN subnet.
 
-For a typical setup (direct all LAN traffic to/from internet through the newly created wireguard interface), you'll need to update your firewall this way:
+## Installation & Setup
 
-- Navigate to Network > Firewall
-- Create a new Zone, name it PIA or whatever you want
-- In the General Settings tab, enable **Masquerading** and **MSS Clamping**, then add **LAN** to **Allow forward from source zones**
-- In the Advanced Settings tab, set **Covered Devices** to **wg_pia**
-- Save the zone
-- Now edit your zone starting with **LAN**
-- Set **Allow forward to destination zones** to **PIA** or whatever you named the previously created zone
-- Traffic should now only be allowed through the wireguard connection
+1.  **Prepare the Router**:
+    Ensure `tailscale`, `wireguard-tools`, and `curl` are installed.
+2.  **Configure PIA**:
+    Run `/opt/scripts/pia_wg.sh start` and follow the prompts to enter your PIA credentials and select a region.
+3.  **Run the Native Setup**:
+    Execute the setup script:
+    ```bash
+    chmod +x /opt/scripts/setup_native_double_vpn.sh
+    /opt/scripts/setup_native_double_vpn.sh
+    ```
+4.  **Tailscale Admin Console**:
+    Log in to your [Tailscale Admin Console](https://login.tailscale.com/admin/machines) and:
+    - **Approve the Exit Node** for the OpenWrt machine.
+    - **Approve the Advertised Route** (`192.168.2.0/24`).
 
-## Update
-The script can be updated to the latest version using: `pia_wg.sh update`
+## Architecture Details
 
-## Advanced/Expert WireGuard network settings (not required for basic/common usage)
-You can setup the script to set any OpenWrt WireGuard network interface or peer settings this way (after running the initial configuration):
-  - for network WireGuard PIA interface: `uci set pia_wg.@net_interface[0].<option>=<value>` then `uci commit pia_wg.@net_interface[0]`
-  - for network WireGuard PIA peer: `uci set pia_wg.@net_peer[0].<option>=<value>` then `uci commit pia_wg.@net_peer[0]`
+### Routing Logic
+The script uses **Policy Based Routing (PBR)** built directly into the Linux kernel:
+- **Priority 1900**: Allows Tailscale to "see" local LAN subnets.
+- **Priority 2000**: Catches Tailscale's encrypted tunnel traffic (`0x80000`) and sends it out via the physical WAN gateway.
+- **Main Table**: The default gateway is set to `wg_pia`, ensuring all regular traffic (Exit Node payload, LAN devices) goes through the VPN.
 
-For example, to prevent OpenWrt to route all the traffic through the VPN:
-```
-uci set pia_wg.@net_peer[0].route_allowed_ips='0'
-uci commit pia_wg.@net_peer[0]
-```
+### Firewall Security
+- **LAN Isolation**: The WAN interface is set to `REJECT` incoming traffic, effectively hiding your private devices from the rest of the house.
+- **Forwarding**: Explicit rules allow `Tailscale -> PIA` and `Tailscale -> LAN`.
 
-Or to put a fwmark on the outgoing VPN traffic:
-```
-uci set pia_wg.@net_interface[0].fwmark='0x1'
-uci commit pia_wg.@net_interface[0]
-```
-
-Then, next time you use `./pia_wg.sh start` (if not already started, otherwise you need to restart or do stop then start to enable the new configuration) or `./pia_wg.sh restart`, it will use these extra settings when OpenWrt WireGuard will create the PIA interface and the PIA peer.
-
-## Watchdog
-The script can install a watchdog that will check regularly the status and restart the VPN if needed.
-<br/> For that, just use `--watchdog` when using `start`or `restart`, or run the command `./pia_wg.sh watchdog install`
-<br/> To unsinstall/remove the watchdog, use `./pia_wg.sh watchdog remove`; when `./pia_wg.sh stop` is used, the watchdog is automatically removed
-
-## Logging
-When the watchdog is enabled, the scripts log is located in `/var/log/pia_wg_watchdog.log`
-The log can be displayed using `pia_wg.sh log show` and cleared using `pia_wg_sh log clear`
-
-## Usage
-Usage: `pia_wg.sh { configure <section> | start [ --watchdog ] | restart [ --watchdog ] | stop | status | watchdog { install | remove } | log { show | clear | path } | update | version}
-<br/>  Details:
-  - `configure`          : same as configure all
-  - `configure all`      : configure all settings
-  - `configure user`     : set PIA user ID and password
-  - `configure dip`      : set PIA dedicated IP
-  - `configure region`   : set/choose PIA region
-  - `configure keys`     : generate local WireGuard keys
-  - `configure network`  : generate default network settings
-  - `init-network`       : setup PIA WireGuard network (no start)
-  - `start`              : start PIA WireGuard (if not already up)
-  - `start --watchdog`   : same as start and install the watchdog
-  - `restart`            : start or restart PIA WireGuard
-  - `restart --watchdog` : same as restart and install the watchdog
-  - `stop`               : stop PIA WireGuard (and remove the watchdog)
-  - `status`             : show PIA WireGuard status
-  - `watchdog install`   : install the watchdog
-  - `watchdog remove`    : remove the watchdog
-  - `log show`           : display the watchdog log
-  - `log clear`          : clear the watchdog log
-  - `log path`           : set a custom Directory Path for the log
-  - `update`             : update the script to latest version
-  - `version`            : print the version and exit
-
-## Notes
-Please, take into account that the script is only creating and setting up the WireGuard interface. It is up to the user to set up/adapt his firewall zones (either including the interface in the WAN zone, or creating a specific zone for it named VPN, PIA or whichever name you want).
-
-A user reported an issue not directly linked to this script but that others users might experience : on his OpenWrt setup, when his router restarts, the time is not properly set and it prevents the interface to go up.
-He proposed a solution here: https://github.com/bolemo/pia_wg/issues/5
-
-## Copyright
-©2026 bOLEMO
+## Maintenance
+If you ever factory reset or update your router, simply re-run the `setup_native_double_vpn.sh` script to restore the entire routing architecture in one go.
