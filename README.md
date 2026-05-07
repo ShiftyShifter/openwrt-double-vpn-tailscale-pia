@@ -54,4 +54,22 @@ The script uses **Policy Based Routing (PBR)** built directly into the Linux ker
 - **Forwarding**: Explicit rules allow `Tailscale -> PIA` and `Tailscale -> LAN`.
 
 ## Maintenance
-If you ever factory reset or update your router, simply re-run the `setup_native_double_vpn.sh` script to restore the entire routing architecture in one go.
+## Backup & Recovery
+
+This setup is designed to be highly portable and backup-friendly.
+
+### What to Include in Your Backup
+To ensure a full recovery, include the following files and directories in your backup strategy:
+- **UCI Configurations**: `/etc/config/network`, `/etc/config/firewall`, `/etc/config/dhcp`, and `/etc/config/pia_wg`.
+- **Routing Tables**: `/etc/iproute2/rt_tables` (defines the `wan_direct` table name).
+- **Scripts**: `/opt/scripts/` (contains all automation logic).
+- **Tailscale State**: `/var/lib/tailscale/` (Optional: preserves your router's Tailscale identity).
+
+### Recovery Steps
+1. **Fresh Install**: Install OpenWrt and the necessary packages:
+   ```bash
+   opkg update && opkg install tailscale wireguard-tools curl jq-full ip-full openssh-sftp-server
+   ```
+2. **Restore Files**: Restore the backed-up configurations and scripts to their original locations.
+3. **Re-establish VPN**: Run `/opt/scripts/pia_wg.sh start` to initialize the VPN interface and keys.
+4. **Apply Routing**: Run `/opt/scripts/setup_native_double_vpn.sh` to re-apply the native double-VPN routing and firewall rules.
