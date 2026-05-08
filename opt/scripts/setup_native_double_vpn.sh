@@ -1,10 +1,30 @@
-#!/bin/sh
-
 # setup_native_double_vpn.sh (SAFE VERSION)
 # 1. Routes all LAN and Tailscale exit node traffic through PIA VPN.
 # 2. Forces Tailscale underlay (fwmark 0x80000) to bypass VPN via physical WAN.
 
+# --- CONFIGURATION ---
+LAN_IP="192.168.2.1"
+LAN_NETMASK="255.255.255.0"
+ADMIN_IP="192.168.1.92"      # IP allowed to access router from WAN
+TS_PORT="41641"              # Tailscale UDP port
+WAN_DIRECT_TABLE="100"
+WAN_DIRECT_NAME="wan_direct"
+WAN_PORTS="wan lan4"         # Ports to include in br-extender
+LAN_PORTS="lan1 lan2 lan3"   # Ports to include in br-lan
+
+# --- HELPER FUNCTIONS ---
+check_dependencies() {
+    local deps="uci ip tailscale grep awk"
+    for dep in $deps; do
+        if ! command -v "$dep" >/dev/null 2>&1; then
+            echo "ERROR: Missing dependency: $dep"
+            exit 1
+        fi
+    done
+}
+
 echo "Starting Safe Native Double-VPN Configuration..."
+check_dependencies
 
 # 1. Disable PBR
 echo "Disabling PBR..."
@@ -12,9 +32,9 @@ echo "Disabling PBR..."
 /etc/init.d/pbr disable 2>/dev/null
 
 # 2. Configure Routing Tables
-if ! grep -q "wan_direct" /etc/iproute2/rt_tables; then
-    echo "Adding wan_direct table to /etc/iproute2/rt_tables"
-    echo "100 wan_direct" >> /etc/iproute2/rt_tables
+if ! grep -q "$WAN_DIRECT_NAME" /etc/iproute2/rt_tables; then
+    echo "Adding $WAN_DIRECT_NAME table to /etc/iproute2/rt_tables"
+    echo "$WAN_DIRECT_TABLE $WAN_DIRECT_NAME" >> /etc/iproute2/rt_tables
 fi
 
 # 3. Configure UCI Network
@@ -25,24 +45,21 @@ uci -q delete network.br_extender
 uci set network.br_extender=device
 uci set network.br_extender.name='br-extender'
 uci set network.br_extender.type='bridge'
-uci add_list network.br_extender.ports='wan'
-uci add_list network.br_extender.ports='lan4'
+for port in $WAN_PORTS; do uci add_list network.br_extender.ports="$port"; done
 
 # Update br-lan bridge device (ensure lan4 is NOT in it to avoid conflicts)
 uci -q delete network.device_br_lan
 uci set network.device_br_lan=device
 uci set network.device_br_lan.name='br-lan'
 uci set network.device_br_lan.type='bridge'
-uci add_list network.device_br_lan.ports='lan1'
-uci add_list network.device_br_lan.ports='lan2'
-uci add_list network.device_br_lan.ports='lan3'
+for port in $LAN_PORTS; do uci add_list network.device_br_lan.ports="$port"; done
 
 # LAN Interface
 uci set network.lan=interface
 uci set network.lan.device='br-lan'
 uci set network.lan.proto='static'
-uci set network.lan.ipaddr='192.168.2.1'
-uci set network.lan.netmask='255.255.255.0'
+uci set network.lan.ipaddr="$LAN_IP"
+uci set network.lan.netmask="$LAN_NETMASK"
 uci set network.lan.ip6assign='60'
 
 # WAN Interface
@@ -77,7 +94,7 @@ uci -q delete network.ts_underlay_bypass
 uci set network.ts_underlay_bypass=rule
 uci set network.ts_underlay_bypass.name='Tailscale-Underlay-WAN-Bypass'
 uci set network.ts_underlay_bypass.mark='0x80000/0xff0000'
-uci set network.ts_underlay_bypass.lookup='wan_direct'
+uci set network.ts_underlay_bypass.lookup="$WAN_DIRECT_NAME"
 uci set network.ts_underlay_bypass.priority='2000'
 
 # Tailscale Local Bypass (access local devices)
@@ -95,11 +112,10 @@ if [ -z "$WAN_GW" ]; then
     WAN_GW=$(uci -q get network.wan.gateway)
 fi
 
-uci -q delete network.wan_direct_route
 uci set network.wan_direct_route=route
 uci set network.wan_direct_route.interface='wan'
 uci set network.wan_direct_route.target='0.0.0.0/0'
-uci set network.wan_direct_route.table='wan_direct'
+uci set network.wan_direct_route.table="$WAN_DIRECT_NAME"
 [ -n "$WAN_GW" ] && uci set network.wan_direct_route.gateway="$WAN_GW"
 
 uci commit network
@@ -188,7 +204,7 @@ uci set firewall.rule_ts_wan.name='Allow-Tailscale-WAN'
 uci set firewall.rule_ts_wan.src='wan'
 uci set firewall.rule_ts_wan.target='ACCEPT'
 uci set firewall.rule_ts_wan.proto='udp'
-uci set firewall.rule_ts_wan.dest_port='41641'
+uci set firewall.rule_ts_wan.dest_port="$TS_PORT"
 
 # Allow Admin Access from specific IP
 uci -q delete firewall.rule_admin
@@ -204,10 +220,10 @@ uci -q delete firewall.redirect_admin
 uci set firewall.redirect_admin=redirect
 uci set firewall.redirect_admin.name='Restricted-Admin-Access'
 uci set firewall.redirect_admin.src='wan'
-uci set firewall.redirect_admin.src_ip='192.168.1.92'
+uci set firewall.redirect_admin.src_ip="$ADMIN_IP"
 uci set firewall.redirect_admin.src_dport='8080'
 uci set firewall.redirect_admin.dest='lan'
-uci set firewall.redirect_admin.dest_ip='192.168.2.1'
+uci set firewall.redirect_admin.dest_ip="$LAN_IP"
 uci set firewall.redirect_admin.dest_port='80'
 uci set firewall.redirect_admin.proto='tcp'
 uci set firewall.redirect_admin.target='DNAT'
@@ -228,6 +244,16 @@ else
     echo "Tailscale is logged in. Updating settings..."
     tailscale set --accept-dns=false --advertise-exit-node --advertise-routes="$LAN_SUBnet" 2>/dev/null || true
 fi
+
+echo ""
+echo "----------------------------------------------------------------"
+echo "IMPORTANT: TAILSCALE APPROVAL REQUIRED"
+echo "1. Go to: https://login.tailscale.com/admin/machines"
+echo "2. Find this device (OpenWrt)"
+echo "3. Click the '...' menu -> 'Edit route settings'"
+echo "4. Enable 'Use as exit node' AND approve the advertised routes"
+echo "----------------------------------------------------------------"
+echo ""
 
 # 6. Apply Changes
 echo "Applying changes..."

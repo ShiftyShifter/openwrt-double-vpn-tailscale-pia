@@ -22,6 +22,22 @@ PIA_TOKEN_EXPIRY_SECONDS=86400  # 24 hours
 
 # --- HELPER FUNCTIONS ---
 
+# Checks if required tools are installed
+check_dependencies() {
+    local deps="curl jq wg nslookup"
+    local missing=""
+    for dep in $deps; do
+        if ! command -v "$dep" >/dev/null 2>&1; then
+            missing="$missing $dep"
+        fi
+    done
+
+    if [ -n "$missing" ]; then
+        log_message "ERROR: Missing dependencies:$missing. Run 'sh bootstrap_router.sh' to install them."
+        exit 1
+    fi
+}
+
 # Logs a message with a timestamp to the log file and optionally to stderr
 log_message() {
     local message="$1"
@@ -249,19 +265,56 @@ EOI
 
 # Verifies if the VPN tunnel is actually passing traffic
 verify_vpn_connectivity() {
+    local silent="$1"
+    
     if ! wg show "$INTERFACE_NAME" >/dev/null 2>&1; then
-        echo "Interface $INTERFACE_NAME is DOWN."
+        [ -z "$silent" ] && echo "Interface $INTERFACE_NAME is DOWN."
         return 1
     fi
 
     # Try pinging through the VPN interface
     if ping -q -c1 -W2 -I "$INTERFACE_NAME" 8.8.8.8 >/dev/null 2>&1; then
-        echo "VPN Connectivity: OK"
+        [ -z "$silent" ] && echo "VPN Connectivity: OK"
         return 0
     else
-        echo "VPN Connectivity: FAILED (No traffic flow)"
+        [ -z "$silent" ] && echo "VPN Connectivity: FAILED (No traffic flow)"
         return 1
     fi
+}
+
+# Displays detailed VPN status including external IP
+show_detailed_status() {
+    echo "--- PIA VPN Status Report ---"
+    
+    # Check Interface
+    if wg show "$INTERFACE_NAME" >/dev/null 2>&1; then
+        echo "Interface: $INTERFACE_NAME [UP]"
+        
+        # Get WG details
+        local handshake=$(wg show "$INTERFACE_NAME" latest-handshakes | awk '{print $2}')
+        local transfer=$(wg show "$INTERFACE_NAME" transfer)
+        
+        if [ "$handshake" -eq 0 ]; then
+            echo "Handshake: NEVER (Check credentials/server)"
+        else
+            local now=$(date +%s)
+            local diff=$((now - handshake))
+            echo "Last Handshake: $diff seconds ago"
+        fi
+        echo "Data Usage: $transfer"
+        
+        # Check Connectivity & IP
+        if verify_vpn_connectivity "silent"; then
+            echo "Connectivity: Working"
+            echo -n "External IP: "
+            curl -s --interface "$INTERFACE_NAME" https://ifconfig.me || echo "Error fetching IP"
+        else
+            echo "Connectivity: BROKEN"
+        fi
+    else
+        echo "Interface: $INTERFACE_NAME [DOWN]"
+    fi
+    echo "----------------------------"
 }
 
 start_vpn() {
@@ -335,6 +388,7 @@ print_usage() {
 
 case "$1" in
     "configure")
+        check_dependencies
         configure_pia_credentials
         interactive_region_selection
         apply_firewall_configuration
@@ -350,6 +404,7 @@ case "$1" in
         fi
         ;;
     "start")
+        check_dependencies
         start_vpn
         manage_watchdog install
         ;;
@@ -358,7 +413,7 @@ case "$1" in
         stop_vpn
         ;;
     "status")
-        verify_vpn_connectivity
+        show_detailed_status
         ;;
     "watchdog")
         manage_watchdog "$2"
