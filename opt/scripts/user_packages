@@ -1,0 +1,10 @@
+coreutils-nl
+coreutils-stty
+coreutils-nohup
+curl
+jq-full
+luci-proto-wireguard
+tailscale
+wireguard-tools
+iptables-nft
+ip6tables-nft
