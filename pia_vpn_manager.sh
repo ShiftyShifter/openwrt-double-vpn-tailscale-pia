@@ -149,31 +149,31 @@ EOI
 apply_firewall_configuration() {
     log_message "Syncing firewall rules for 'pia_exit' zone..."
     
-    # Check if zone exists
-    local zone_index=$(uci show firewall | grep "@zone" | grep ".name='pia_exit'" | cut -d'[' -f2 | cut -d']' -f1 | head -1)
+    # Use named section for the zone to avoid duplicates and simplify management
+    # If it already exists as an anonymous section, we'll try to 'convert' it by deleting and recreating
+    local anon_zone=$(uci show firewall | grep "@zone" | grep ".name='pia_exit'" | cut -d'[' -f2 | cut -d']' -f1 | head -1)
+    [ -n "$anon_zone" ] && uci delete firewall.@zone[$anon_zone]
 
-    if [ -z "$zone_index" ]; then
-        log_message "Creating firewall zone 'pia_exit'..."
-        uci add firewall zone >/dev/null
-        uci set firewall.@zone[-1].name='pia_exit'
-        uci set firewall.@zone[-1].input='REJECT'
-        uci set firewall.@zone[-1].output='ACCEPT'
-        uci set firewall.@zone[-1].forward='REJECT'
-        uci set firewall.@zone[-1].masq='1'
-        uci set firewall.@zone[-1].mtu_fix='1'
-        uci add_list firewall.@zone[-1].network="$INTERFACE_NAME"
-        
-        # Default forwarding from LAN to VPN
-        uci add firewall forwarding >/dev/null
-        uci set firewall.@forwarding[-1].src='lan'
-        uci set firewall.@forwarding[-1].dest='pia_exit'
-    else
-        uci set firewall.@zone[$zone_index].masq='1'
-        uci set firewall.@zone[$zone_index].mtu_fix='1'
-        # Ensure interface is in the network list
-        uci del_list firewall.@zone[$zone_index].network="$INTERFACE_NAME"
-        uci add_list firewall.@zone[$zone_index].network="$INTERFACE_NAME"
-    fi
+    uci set firewall.pia_exit=zone
+    uci set firewall.pia_exit.name='pia_exit'
+    uci set firewall.pia_exit.input='REJECT'
+    uci set firewall.pia_exit.output='ACCEPT'
+    uci set firewall.pia_exit.forward='REJECT'
+    uci set firewall.pia_exit.masq='1'
+    uci set firewall.pia_exit.mtu_fix='1'
+    
+    # Ensure interface is in the network list without duplication
+    uci del_list firewall.pia_exit.network="$INTERFACE_NAME" 2>/dev/null
+    uci add_list firewall.pia_exit.network="$INTERFACE_NAME"
+    
+    # Use named section for forwarding to avoid duplicates
+    # Clean up any matching anonymous forwarding first
+    local anon_fwd=$(uci show firewall | grep "@forwarding" | grep ".src='lan'" | grep ".dest='pia_exit'" | cut -d'[' -f2 | cut -d']' -f1 | head -1)
+    [ -n "$anon_fwd" ] && uci delete firewall.@forwarding[$anon_fwd]
+
+    uci set firewall.fwd_lan_pia=forwarding
+    uci set firewall.fwd_lan_pia.src='lan'
+    uci set firewall.fwd_lan_pia.dest='pia_exit'
     
     uci commit firewall
     /etc/init.d/firewall restart >/dev/null 2>&1

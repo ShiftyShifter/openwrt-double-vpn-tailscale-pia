@@ -63,37 +63,45 @@ uci commit network
 # 4. Configure UCI Firewall
 echo "Configuring firewall zones and forwardings..."
 
-# Ensure zones exist
-if ! uci -q get firewall.tailscale >/dev/null; then
-    uci set firewall.tailscale=zone
-    uci set firewall.tailscale.name='tailscale'
-    uci set firewall.tailscale.input='ACCEPT'
-    uci set firewall.tailscale.output='ACCEPT'
-    uci set firewall.tailscale.forward='REJECT'
-    uci set firewall.tailscale.masq='1'
-    uci set firewall.tailscale.mtu_fix='1'
-    uci set firewall.tailscale.network='tailscale'
-fi
+# Ensure zones exist using named sections to avoid duplicates
+# Tailscale Zone
+local anon_ts_zone=$(uci show firewall | grep "@zone" | grep ".name='tailscale'" | cut -d'[' -f2 | cut -d']' -f1 | head -1)
+[ -n "$anon_ts_zone" ] && uci delete firewall.@zone[$anon_ts_zone]
 
-if ! uci -q get firewall.pia_exit >/dev/null; then
-    uci set firewall.pia_exit=zone
-    uci set firewall.pia_exit.name='pia_exit'
-    uci set firewall.pia_exit.input='REJECT'
-    uci set firewall.pia_exit.output='ACCEPT'
-    uci set firewall.pia_exit.forward='REJECT'
-    uci set firewall.pia_exit.masq='1'
-    uci set firewall.pia_exit.mtu_fix='1'
-    uci set firewall.pia_exit.network='wg_pia'
-fi
+uci set firewall.tailscale=zone
+uci set firewall.tailscale.name='tailscale'
+uci set firewall.tailscale.input='ACCEPT'
+uci set firewall.tailscale.output='ACCEPT'
+uci set firewall.tailscale.forward='REJECT'
+uci set firewall.tailscale.masq='1'
+uci set firewall.tailscale.mtu_fix='1'
+uci set firewall.tailscale.network='tailscale'
 
-# Add forwardings if they don't exist
+# PIA Exit Zone
+local anon_pia_zone=$(uci show firewall | grep "@zone" | grep ".name='pia_exit'" | cut -d'[' -f2 | cut -d']' -f1 | head -1)
+[ -n "$anon_pia_zone" ] && uci delete firewall.@zone[$anon_pia_zone]
+
+uci set firewall.pia_exit=zone
+uci set firewall.pia_exit.name='pia_exit'
+uci set firewall.pia_exit.input='REJECT'
+uci set firewall.pia_exit.output='ACCEPT'
+uci set firewall.pia_exit.forward='REJECT'
+uci set firewall.pia_exit.masq='1'
+uci set firewall.pia_exit.mtu_fix='1'
+uci set firewall.pia_exit.network='wg_pia'
+
+# Add forwardings using named sections
 add_forwarding() {
-    src=$1; dest=$2
-    if ! uci show firewall | grep -q "src='$src'.*dest='$dest'"; then
-        uci add firewall forwarding >/dev/null
-        uci set firewall.@forwarding[-1].src="$src"
-        uci set firewall.@forwarding[-1].dest="$dest"
-    fi
+    local src=$1; local dest=$2
+    local name="fwd_${src}_${dest}"
+    
+    # Clean up any matching anonymous forwarding first
+    local anon_fwd=$(uci show firewall | grep "@forwarding" | grep ".src='$src'" | grep ".dest='$dest'" | cut -d'[' -f2 | cut -d']' -f1 | head -1)
+    [ -n "$anon_fwd" ] && uci delete firewall.@forwarding[$anon_fwd]
+
+    uci set firewall."$name"=forwarding
+    uci set firewall."$name".src="$src"
+    uci set firewall."$name".dest="$dest"
 }
 
 add_forwarding 'lan' 'pia_exit'
@@ -101,15 +109,16 @@ add_forwarding 'tailscale' 'pia_exit'
 add_forwarding 'tailscale' 'lan'
 add_forwarding 'lan' 'wan'
 
-# Allow Tailscale underlay port on WAN
-if ! uci show firewall | grep -q "dest_port='41641'"; then
-    uci add firewall rule >/dev/null
-    uci set firewall.@rule[-1].name='Allow-Tailscale-WAN'
-    uci set firewall.@rule[-1].src='wan'
-    uci set firewall.@rule[-1].target='ACCEPT'
-    uci set firewall.@rule[-1].proto='udp'
-    uci set firewall.@rule[-1].dest_port='41641'
-fi
+# Allow Tailscale underlay port on WAN using a named rule
+local anon_ts_rule=$(uci show firewall | grep "@rule" | grep ".dest_port='41641'" | cut -d'[' -f2 | cut -d']' -f1 | head -1)
+[ -n "$anon_ts_rule" ] && uci delete firewall.@rule[$anon_ts_rule]
+
+uci set firewall.rule_ts_wan=rule
+uci set firewall.rule_ts_wan.name='Allow-Tailscale-WAN'
+uci set firewall.rule_ts_wan.src='wan'
+uci set firewall.rule_ts_wan.target='ACCEPT'
+uci set firewall.rule_ts_wan.proto='udp'
+uci set firewall.rule_ts_wan.dest_port='41641'
 
 uci commit firewall
 
