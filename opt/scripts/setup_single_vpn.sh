@@ -17,7 +17,7 @@ echo "Installing required packages from requirements.txt..."
 cat requirements.txt | xargs opkg install
 
 echo "Setting permissions..."
-chmod +x setup_single_vpn.sh revert_single_vpn.sh setup_double_vpn.sh
+chmod +x setup_single_vpn.sh revert_single_vpn.sh setup_double_vpn.sh fix_tailscale_exit_node.sh diagnose_tailscale.sh
 
 # --- CONFIGURATION ---
 LAN_IP="192.168.2.1"
