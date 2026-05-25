@@ -3,7 +3,7 @@
 # Ensure we are running from the script's directory
 cd "$(dirname "$0")" || exit 1
 
-echo "Starting System Bootstrap..."
+echo "Starting Double-VPN System Bootstrap..."
 
 if [ ! -f "requirements.txt" ]; then
     echo "ERROR: 'requirements.txt' file not found in $(pwd)"
@@ -17,13 +17,13 @@ echo "Installing required packages from requirements.txt..."
 cat requirements.txt | xargs opkg install
 
 echo "Setting permissions..."
-chmod +x pia_vpn_manager.sh setup_native_double_vpn.sh
+chmod +x pia_vpn_manager.sh setup_native_double_vpn.sh setup_single_vpn.sh revert_single_vpn.sh setup_double_vpn.sh
 
-echo "Running network setup..."
+echo "Running Double-VPN network setup..."
 sh setup_native_double_vpn.sh
 
 echo "----------------------------------------------------------------"
-echo "BOOTSTRAP COMPLETE"
+echo "DOUBLE-VPN BOOTSTRAP COMPLETE"
 echo "1. Wait for network to change IP and then reconnect to 192.168.2.1"
 echo "2. Approve routes/exit node at: https://login.tailscale.com/admin/machines"
 echo "3. Run: sh pia_vpn_manager.sh configure"
