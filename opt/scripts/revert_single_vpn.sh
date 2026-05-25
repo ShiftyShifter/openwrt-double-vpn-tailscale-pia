@@ -44,7 +44,7 @@ else
     log_message "-> Crontab is empty. No action needed."
 fi
 
-# 2. Deactivate and Remove PIA Wireguard Interfaces
+# 2. Deactivate and Remove PIA Wireguard Interfaces & Eliminate Netifd Conflict
 log_message "2. Deactivating and deleting 'wg_pia' interface..."
 if command -v ifdown >/dev/null 2>&1; then
     ifdown wg_pia >/dev/null 2>&1
@@ -52,6 +52,15 @@ fi
 
 uci -q delete network.wg_pia
 uci -q delete network.wgpeer_pia
+
+# On modern OpenWrt releases, defining a logical 'tailscale' interface in /etc/config/network
+# conflicts with 'tailscaled' attempting to assign IPv4 addresses to 'tailscale0' via Netlink.
+# Deleting 'network.tailscale' lets tailscaled assign IPs correctly without netifd interference.
+if uci -q get network.tailscale >/dev/null; then
+    uci delete network.tailscale
+    log_message "-> Deleted conflicting network.tailscale interface."
+fi
+uci commit network
 log_message "-> Interface and Peer deleted from network config."
 
 # 3. Clean up Policy Routing Rules and Tables
@@ -81,6 +90,21 @@ uci -q delete firewall.fwd_tailscale_pia_exit
 uci -q delete firewall.fwd_lan_pia
 uci -q delete firewall.fwd_tailscale_pia
 
+# Overwrite/Ensure clean named tailscale zone mapped directly to device tailscale0
+anon_ts_zone=$(uci show firewall | grep "@zone" | grep ".name='tailscale'" | cut -d'[' -f2 | cut -d']' -f1 | head -1)
+[ -n "$anon_ts_zone" ] && uci delete firewall.@zone[$anon_ts_zone]
+
+uci set firewall.tailscale=zone
+uci set firewall.tailscale.name='tailscale'
+uci set firewall.tailscale.input='ACCEPT'
+uci set firewall.tailscale.output='ACCEPT'
+uci set firewall.tailscale.forward='ACCEPT' # Essential for robust exit-node forwarding
+uci set firewall.tailscale.masq='1'        # NAT exit traffic correctly
+uci set firewall.tailscale.mtu_fix='1'     # Prevent MSS clamping issues over VPN
+uci -q delete firewall.tailscale.network
+uci add_list firewall.tailscale.device='tailscale0'
+log_message "-> Firewall zone 'tailscale' configured directly on device 'tailscale0'."
+
 # Helper function to add named firewall forwarding safely
 add_forwarding() {
     local src=$1; local dest=$2
@@ -105,18 +129,55 @@ add_forwarding 'lan' 'wan'
 log_message "-> Restoring/Ensuring 'tailscale' -> 'lan' forwarding"
 add_forwarding 'tailscale' 'lan'
 
+log_message "-> Restoring/Ensuring 'lan' -> 'tailscale' forwarding"
+add_forwarding 'lan' 'tailscale'
+
 uci commit firewall
 log_message "-> UCI firewall rules committed."
 
-# 5. Apply changes and restart networking/firewall
-log_message "5. Applying and restarting network and firewall services..."
-/etc/init.d/network restart
-log_message "-> Network restarted."
-/etc/init.d/firewall restart
-log_message "-> Firewall restarted."
+# 5. Enable IP Forwarding & Patch DNSmasq Restrictions
+log_message "5. Patching IP forwarding and DNSmasq local service/wildcard settings..."
 
-# 6. Verify and report status
-log_message "6. Verifying connection and status..."
+# Enable immediately in running kernel
+sysctl -w net.ipv4.ip_forward=1 >/dev/null
+sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null
+
+# Persist in /etc/sysctl.conf
+for param in "net.ipv4.ip_forward=1" "net.ipv6.conf.all.forwarding=1"; do
+    local key=$(echo "$param" | cut -d= -f1)
+    if ! grep -q "$key" /etc/sysctl.conf; then
+        echo "$param" >> /etc/sysctl.conf
+    else
+        sed -i "s/$key=.*/$param/" /etc/sysctl.conf
+    fi
+done
+
+# Patch DNSmasq to bind to wildcard 0.0.0.0 and accept CGNAT queries
+uci set dhcp.@dnsmasq[0].localservice='0'
+uci set dhcp.@dnsmasq[0].nonwildcard='0'
+uci -q delete dhcp.@dnsmasq[0].interface
+uci commit dhcp
+log_message "-> IP forwarding enabled and DNSmasq restrictions patched."
+
+# 6. Apply changes and restart networking/firewall/DNS
+log_message "6. Applying and restarting network, firewall, and DNS services..."
+/etc/init.d/network restart
+sleep 2
+/etc/init.d/firewall restart
+sleep 2
+/etc/init.d/dnsmasq restart
+log_message "-> Services restarted successfully."
+
+# 7. Reinforce Tailscale Exit Node Flags
+log_message "7. Re-registering Tailscale Exit Node flags..."
+LAN_SUBNET="192.168.2.0/24"
+if command -v tailscale >/dev/null 2>&1; then
+    tailscale up --advertise-exit-node --advertise-routes="$LAN_SUBNET" --accept-dns=false
+    log_message "-> Tailscale exit node flags successfully re-registered."
+fi
+
+# 8. Verify and report status
+log_message "8. Verifying connection and status..."
 sleep 4
 
 # Check external internet connection
@@ -137,3 +198,5 @@ fi
 log_message "=== REVERSION TO SINGLE VPN COMPLETE ==="
 log_message "All hardware settings, bridges, and Tailscale exit node routes have been preserved."
 log_message "PIA VPN interface and watchdog triggers are completely removed."
+log_message "All DNS, firewall, and netifd conflict resolutions have been successfully applied."
+
